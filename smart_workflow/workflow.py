@@ -1,0 +1,131 @@
+"""Workflow orchestration primitives."""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Callable, List, Optional
+
+from .task import BaseTask, TaskContext, TaskError, TaskResult
+
+TaskFactory = Callable[[], BaseTask]
+
+
+@dataclass
+class WorkflowStartupTask:
+    name: str | None
+    factory: TaskFactory
+
+
+@dataclass
+class WorkflowLoopTask:
+    name: str | None
+    factory: TaskFactory
+
+
+class Workflow:
+    """Defines startup tasks and the looping task factory."""
+
+    def __init__(self) -> None:
+        self._startup_tasks: List[WorkflowStartupTask] = []
+        self._loop_task: Optional[WorkflowLoopTask] = None
+
+    def add_startup_task(
+        self,
+        factory_or_name: TaskFactory | str,
+        factory: TaskFactory | None = None,
+    ) -> None:
+        name: str | None
+        task_factory: TaskFactory
+        if callable(factory_or_name) and factory is None:
+            name = None
+            task_factory = factory_or_name
+        elif isinstance(factory_or_name, str) and factory is not None and callable(factory):
+            name = factory_or_name
+            task_factory = factory
+        else:
+            raise TypeError("add_startup_task expects a factory or (name, factory)")
+
+        self._startup_tasks.append(WorkflowStartupTask(name=name, factory=task_factory))
+
+    def set_loop(
+        self,
+        factory_or_name: TaskFactory | str,
+        factory: TaskFactory | None = None,
+    ) -> None:
+        name: str | None
+        task_factory: TaskFactory
+        if callable(factory_or_name) and factory is None:
+            name = None
+            task_factory = factory_or_name
+        elif isinstance(factory_or_name, str) and factory is not None and callable(factory):
+            name = factory_or_name
+            task_factory = factory
+        else:
+            raise TypeError("set_loop expects a factory or (name, factory)")
+
+        self._loop_task = WorkflowLoopTask(name=name, factory=task_factory)
+
+    @property
+    def startup_tasks(self) -> List[WorkflowStartupTask]:
+        return list(self._startup_tasks)
+
+    @property
+    def loop_task(self) -> WorkflowLoopTask:
+        if self._loop_task is None:
+            raise RuntimeError("Loop task not configured")
+        return self._loop_task
+
+
+class WorkflowRunner:
+    """Run workflow startup tasks then keep executing loop tasks."""
+
+    def __init__(
+        self,
+        context: TaskContext,
+        workflow: Workflow,
+        loop_interval: float,
+        retry_backoff: float,
+    ) -> None:
+        self.context = context
+        self.workflow = workflow
+        self.loop_interval = loop_interval
+        self.retry_backoff = retry_backoff
+
+    def run(self) -> None:
+        self._run_startup()
+        self.context.logger.info("workflow runner started")
+
+        while True:
+            try:
+                loop_spec = self.workflow.loop_task
+                if loop_spec.name:
+                    self.context.logger.debug("running loop task %s", loop_spec.name)
+                result = loop_spec.factory().execute(self.context)
+                payload = result.payload or {}
+                sleep_time = payload.get("sleep")
+                time.sleep(float(sleep_time or self.loop_interval))
+            except KeyboardInterrupt:
+                self.context.logger.info("workflow runner interrupted")
+                break
+            except TaskError as exc:
+                self.context.logger.warning("task error: %s; applying retry backoff", exc)
+                time.sleep(self.retry_backoff)
+            except Exception:  # noqa: BLE001
+                self.context.logger.exception("unexpected error; applying retry backoff")
+                time.sleep(self.retry_backoff)
+
+    def _run_startup(self) -> None:
+        for spec in self.workflow.startup_tasks:
+            if spec.name:
+                self.context.logger.info("running startup task %s", spec.name)
+            task = spec.factory()
+            task.execute(self.context)
+
+
+__all__ = [
+    "Workflow",
+    "WorkflowRunner",
+    "TaskFactory",
+    "WorkflowStartupTask",
+    "WorkflowLoopTask",
+]

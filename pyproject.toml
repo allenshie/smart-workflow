@@ -1,0 +1,17 @@
+[project]
+name = "smart-workflow"
+version = "0.1.0"
+description = "Lightweight workflow orchestration primitives"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Allen" }]
+license = { file = "LICENSE" }
+keywords = ["workflow", "task-runner", "backoff"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
