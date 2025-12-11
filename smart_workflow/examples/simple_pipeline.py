@@ -28,27 +28,84 @@ class DemoConfig:
     pipeline_model_path: str = "./model.bin"
 
 
+class PipelineNode(BaseTask):
+    """Base class for demo pipeline nodes."""
+
+
+class IngestionTask(PipelineNode):
+    name = "ingestion"
+
+    def __init__(self, source_name: str) -> None:
+        self.source_name = source_name
+
+    def run(self, context: TaskContext) -> TaskResult:
+        frame_id = random.randint(1000, 2000)
+        context.set_resource("current_frame", frame_id)
+        context.logger.info("[%s] ingested frame %s", self.source_name, frame_id)
+        return TaskResult()
+
+
+class InferenceTask(PipelineNode):
+    name = "inference"
+
+    def __init__(self, weight_path: str) -> None:
+        self.weight_path = weight_path
+        self.model = self._load_weight(weight_path)
+
+    def _load_weight(self, weight_path: str) -> str:
+        return f"model<{weight_path}>"
+
+    def run(self, context: TaskContext) -> TaskResult:
+        frame_id = context.require_resource("current_frame")
+        if frame_id % 4 == 0:
+            raise TaskError("GPU inference failed")
+        context.set_resource("inference_output", {"frame": frame_id, "boxes": 3})
+        context.logger.info("inference done for frame %s with %s", frame_id, self.weight_path)
+        return TaskResult()
+
+
+class PublishTask(PipelineNode):
+    name = "publish"
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+    def run(self, context: TaskContext) -> TaskResult:
+        output = context.require_resource("inference_output")
+        context.logger.info("publish result %s to %s", output, self.endpoint)
+        return TaskResult()
+
+
 class DemoPipeline:
-    def __init__(self, config: DemoConfig, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        config: DemoConfig,
+        logger: logging.Logger,
+        nodes: list[PipelineNode],
+    ) -> None:
         self.config = config
         self.logger = logger
-        self.counter = 0
+        self.pipeline_nodes = nodes
 
     def warmup(self) -> None:
         self.logger.info("loading pipeline artifact from %s", self.config.pipeline_model_path)
 
-    def execute(self) -> None:
-        self.counter += 1
-        if self.counter % 4 == 0:
-            raise TaskError("simulated pipeline failure")
-        self.logger.info("processed demo batch #%d", self.counter)
+    def execute(self, context: TaskContext) -> None:
+        for node in self.pipeline_nodes:
+            node.execute(context)
 
 
 class InitPipelineTask(BaseTask):
     name = "pipeline-task-init"
 
     def run(self, context: TaskContext) -> TaskResult:
-        pipeline = DemoPipeline(context.config, context.logger)
+        nodes = [
+            IngestionTask(context.config.service_name),
+            InferenceTask(context.config.pipeline_model_path),
+            PublishTask("http://localhost:9500/ingest"),
+        ]
+        pipeline = DemoPipeline(config=context.config, logger=context.logger, nodes=nodes)
         pipeline.warmup()
         context.set_resource("pipeline", pipeline)
         return TaskResult()
@@ -60,7 +117,7 @@ class PipelineScheduler(BaseTask):
     def run(self, context: TaskContext) -> TaskResult:
         pipeline = context.require_resource("pipeline")
         context.monitor.heartbeat(phase="pipeline-loop")
-        pipeline.execute()
+        pipeline.execute(context)
         return TaskResult(payload={"sleep": 1.5})
 
 
