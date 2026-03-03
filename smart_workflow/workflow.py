@@ -90,36 +90,56 @@ class WorkflowRunner:
         self.workflow = workflow
         self.loop_interval = loop_interval
         self.retry_backoff = retry_backoff
+        self._startup_task_instances: List[BaseTask] = []
+        self._loop_task_instance: BaseTask | None = None
 
     def run(self) -> None:
-        self._run_startup()
-        self.context.logger.info("workflow runner started")
+        try:
+            self._run_startup()
+            loop_spec = self.workflow.loop_task
+            self._loop_task_instance = loop_spec.factory()
+            self.context.logger.info("workflow runner started")
 
-        while True:
-            try:
-                loop_spec = self.workflow.loop_task
-                if loop_spec.name:
-                    self.context.logger.debug("running loop task %s", loop_spec.name)
-                result = loop_spec.factory().execute(self.context)
-                payload = result.payload or {}
-                sleep_time = payload.get("sleep")
-                time.sleep(float(sleep_time or self.loop_interval))
-            except KeyboardInterrupt:
-                self.context.logger.info("workflow runner interrupted")
-                break
-            except TaskError as exc:
-                self.context.logger.warning("task error: %s; applying retry backoff", exc)
-                time.sleep(self.retry_backoff)
-            except Exception:  # noqa: BLE001
-                self.context.logger.exception("unexpected error; applying retry backoff")
-                time.sleep(self.retry_backoff)
+            while True:
+                try:
+                    if loop_spec.name:
+                        self.context.logger.debug("running loop task %s", loop_spec.name)
+                    result = self._loop_task_instance.execute(self.context)
+                    payload = result.payload or {}
+                    sleep_time = payload.get("sleep")
+                    time.sleep(float(sleep_time or self.loop_interval))
+                except KeyboardInterrupt:
+                    self.context.logger.info("workflow runner interrupted")
+                    break
+                except TaskError as exc:
+                    self.context.logger.warning("task error: %s; applying retry backoff", exc)
+                    time.sleep(self.retry_backoff)
+                except Exception:  # noqa: BLE001
+                    self.context.logger.exception("unexpected error; applying retry backoff")
+                    time.sleep(self.retry_backoff)
+        finally:
+            self._shutdown_tasks()
 
     def _run_startup(self) -> None:
         for spec in self.workflow.startup_tasks:
             if spec.name:
                 self.context.logger.info("running startup task %s", spec.name)
             task = spec.factory()
+            self._startup_task_instances.append(task)
             task.execute(self.context)
+
+    def _shutdown_tasks(self) -> None:
+        tasks: List[BaseTask] = []
+        if self._loop_task_instance is not None:
+            tasks.append(self._loop_task_instance)
+        tasks.extend(reversed(self._startup_task_instances))
+
+        for task in tasks:
+            try:
+                task.close(self.context)
+            except Exception:  # noqa: BLE001
+                task_name = getattr(task, "name", task.__class__.__name__)
+                self.context.logger.exception("failed to close task: %s", task_name)
 
 
 __all__ = [

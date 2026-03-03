@@ -79,6 +79,10 @@ class BaseTask:
     def run(self, context: TaskContext) -> TaskResult:  # pragma: no cover - abstract
         raise NotImplementedError
 
+    def close(self, context: TaskContext) -> None:
+        """Lifecycle hook invoked by WorkflowRunner during shutdown."""
+        return None
+
 
 __all__ = [
     "TaskResult",
