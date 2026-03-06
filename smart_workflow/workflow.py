@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+from .health import HealthState
 from .task import BaseTask, TaskContext, TaskError, TaskResult
 
 TaskFactory = Callable[[], BaseTask]
@@ -142,9 +143,67 @@ class WorkflowRunner:
                 self.context.logger.exception("failed to close task: %s", task_name)
 
 
+class HealthAwareWorkflowRunner(WorkflowRunner):
+    """WorkflowRunner with health-state updates for probe endpoints."""
+
+    def __init__(
+        self,
+        context: TaskContext,
+        workflow: Workflow,
+        loop_interval: float,
+        retry_backoff: float,
+        health_state: HealthState,
+    ) -> None:
+        super().__init__(
+            context=context,
+            workflow=workflow,
+            loop_interval=loop_interval,
+            retry_backoff=retry_backoff,
+        )
+        self.health_state = health_state
+
+    def run(self) -> None:
+        try:
+            self._run_startup()
+            self.health_state.mark_startup_ok()
+            loop_spec = self.workflow.loop_task
+            self._loop_task_instance = loop_spec.factory()
+            self.context.logger.info("workflow runner started")
+
+            while True:
+                self.health_state.mark_loop_tick()
+                try:
+                    if loop_spec.name:
+                        self.context.logger.debug("running loop task %s", loop_spec.name)
+                    result = self._loop_task_instance.execute(self.context)
+                    self.health_state.mark_progress()
+                    payload = result.payload or {}
+                    sleep_time = payload.get("sleep")
+                    time.sleep(float(sleep_time or self.loop_interval))
+                except KeyboardInterrupt:
+                    self.context.logger.info("workflow runner interrupted")
+                    break
+                except TaskError as exc:
+                    self.health_state.mark_error(str(exc))
+                    self.health_state.set_backoff(True)
+                    self.context.logger.warning("task error: %s; applying retry backoff", exc)
+                    time.sleep(self.retry_backoff)
+                    self.health_state.set_backoff(False)
+                except Exception:  # noqa: BLE001
+                    self.health_state.mark_error("unexpected_error")
+                    self.health_state.set_backoff(True)
+                    self.context.logger.exception("unexpected error; applying retry backoff")
+                    time.sleep(self.retry_backoff)
+                    self.health_state.set_backoff(False)
+        finally:
+            self.health_state.mark_stopping()
+            self._shutdown_tasks()
+
+
 __all__ = [
     "Workflow",
     "WorkflowRunner",
+    "HealthAwareWorkflowRunner",
     "TaskFactory",
     "WorkflowStartupTask",
     "WorkflowLoopTask",
